@@ -1,23 +1,79 @@
 import json
 import time
 import random
-from datetime import datetime
 import zoneinfo
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import joblib
 import streamlit as st
 import paho.mqtt.client as mqtt
+import plotly.graph_objects as go
 
-# Compatibility handling for TFLite across different deployment platforms
+# Compatibility handling for TFLite
 try:
     import tflite_runtime.interpreter as tflite
 except ImportError:
     import tensorflow.lite as tflite
 
-import plotly.graph_objects as go
+# --- Page Config (Must be first) ---
+st.set_page_config(page_title="DIAO — NetOne Intelligence", layout="wide", initial_sidebar_state="collapsed")
 
-st.set_page_config(page_title="DIAO — NetOne Intelligence", layout="wide")
+# --- Custom CSS injected for the "NetworkOps" NOC Aesthetic ---
+st.markdown("""
+<style>
+    /* Dark theme background with slight blue tint */
+    .stApp {
+        background-color: #0d1117;
+        color: #c9d1d9;
+        font-family: 'Inter', 'Segoe UI', sans-serif;
+    }
+    
+    /* Sleek header styling */
+    h1 {
+        color: #ffffff;
+        font-weight: 700;
+        letter-spacing: -0.5px;
+        border-bottom: 1px solid #30363d;
+        padding-bottom: 10px;
+    }
+    
+    /* Style metric cards to look like hardware readouts */
+    [data-testid="stMetricValue"] {
+        color: #58a6ff !important;
+        font-size: 2.5rem !important;
+        font-family: 'Fira Code', monospace !important;
+    }
+    [data-testid="stMetricLabel"] {
+        color: #8b949e !important;
+        text-transform: uppercase;
+        font-size: 0.85rem !important;
+        letter-spacing: 0.5px;
+    }
+    [data-testid="stMetricDelta"] {
+        background-color: #1f2428;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.8rem !important;
+    }
+    
+    /* Neon Status Indicator */
+    .status-live {
+        color: #3fb950;
+        font-weight: bold;
+        text-shadow: 0 0 5px rgba(63, 185, 80, 0.4);
+    }
+    .status-sim {
+        color: #d29922;
+        font-weight: bold;
+    }
+    
+    /* Clean up dataframe and container borders */
+    .css-1v0mbdj > img {
+        border-radius: 8px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 BROKER = "broker.hivemq.com"
 TOPIC = "diao/netone/telemetry"
@@ -77,7 +133,7 @@ def on_mqtt_message(client, userdata, msg):
     except Exception:
         pass
 
-# Initialize session state variables
+# Initialize state
 if "telemetry" not in st.session_state:
     st.session_state.telemetry = None
 if "sim_rssi_a" not in st.session_state:
@@ -85,10 +141,9 @@ if "sim_rssi_a" not in st.session_state:
 if "sim_rssi_b" not in st.session_state:
     st.session_state.sim_rssi_b = -85.0
 
-# Initialize persistent MQTT connection
+# Persistent MQTT connection
 if "mqtt_client" not in st.session_state:
     try:
-        # Paho MQTT v2.0+ compatibility check
         if hasattr(mqtt, "CallbackAPIVersion"):
             client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="diao_streamlit_sub")
         else:
@@ -116,7 +171,6 @@ else:
     current_angle = 90
     is_live = False
 
-# Normalize time features to Harare timezone (CAT / UTC+2)
 cat_tz = zoneinfo.ZoneInfo("Africa/Harare")
 now_cat = datetime.now(cat_tz)
 current_hour = now_cat.hour
@@ -125,7 +179,7 @@ current_dow = now_cat.weekday()
 gain_a = get_antenna_gain(0, 60) + random.uniform(-1, 1)
 gain_b = get_antenna_gain(90, 60) + random.uniform(-1, 1)
 
-# Ensemble Model Evaluation
+# AI Inference
 X_features = [[rssi_a, rssi_b, gain_a, gain_b, current_hour, current_dow]]
 rf_probs = rf_model.predict_proba(X_features)[0]
 rf_predicted = int(rf_model.predict(X_features)[0])
@@ -146,28 +200,55 @@ else:
         ai_angle = rf_predicted
         ensemble_confidence = rf_confidence
 
-# UI Display
+# --- Dashboard Layout ---
 st.title("DIAO — Dynamic Intelligent Antenna Optimization")
-status_label = "[LIVE (MQTT)]" if is_live else "[SIMULATION - Bridge Offline]"
-st.caption(f"NetOne Band 3 · 1800 MHz · Status: {status_label}")
 
-if is_live and telemetry_data:
-    esp_status = "Connected" if telemetry_data.get("esp32_connected") else "Simulation Mode"
-    st.caption(f"ESP32: {esp_status} | Decision Reason: {telemetry_data.get('decision_reason', 'N/A')}")
+status_class = "status-live" if is_live else "status-sim"
+status_text = "LIVE (MQTT gRPC Emulation)" if is_live else "SIMULATION (Hardware Disconnected)"
+st.markdown(f"**NetOne Band 3 · 1800 MHz** | Status: <span class='{status_class}'>● {status_text}</span>", unsafe_allow_html=True)
+st.markdown("---")
 
 col1, col2, col3, col4, col5, col6 = st.columns(6)
 nearest_sector = min(SECTORS, key=lambda s: abs(s - current_angle))
-col1.metric("Current Angle", f"{current_angle}°", SECTOR_NAMES.get(nearest_sector, "—"))
-col2.metric("AI Prediction", f"{ai_angle}°", f"{ensemble_confidence:.0%} confidence")
-col3.metric("Node A RSSI", f"{rssi_a:.0f} dBm")
-col4.metric("Node B RSSI", f"{rssi_b:.0f} dBm")
-col5.metric("RF Confidence", f"{rf_confidence:.0%}")
-col6.metric("NN Confidence", f"{nn_confidence:.0%}")
 
+# We use the 'delta' parameter to act as a secondary label below the main metric
+col1.metric("Current Angle", f"{current_angle}°", SECTOR_NAMES.get(nearest_sector, "—"))
+col2.metric("AI Target Angle", f"{ai_angle}°", f"{ensemble_confidence:.0%} confidence")
+col3.metric("Node A RSSI", f"{rssi_a:.0f} dBm", "Primary Path")
+col4.metric("Node B RSSI", f"{rssi_b:.0f} dBm", "Secondary Path")
+col5.metric("RF Core Conf.", f"{rf_confidence:.0%}")
+col6.metric("NN Edge Conf.", f"{nn_confidence:.0%}")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# --- High-Tech Plotly Radar Chart ---
 fig = go.Figure()
-fig.add_trace(go.Scatterpolar(r=e_data, theta=angles_e, name="E-Plane"))
-fig.add_trace(go.Scatterpolar(r=h_data, theta=angles_e, name="H-Plane"))
-fig.update_layout(title="HFSS Radiation Pattern (E/H Plane)", height=420, template="plotly_dark")
+fig.add_trace(go.Scatterpolar(
+    r=e_data, theta=angles_e, name="E-Plane", 
+    line=dict(color='#58a6ff', width=2),
+    fill='toself', fillcolor='rgba(88, 166, 255, 0.1)'
+))
+fig.add_trace(go.Scatterpolar(
+    r=h_data, theta=angles_e, name="H-Plane", 
+    line=dict(color='#ff7b72', width=2),
+    fill='toself', fillcolor='rgba(255, 123, 114, 0.1)'
+))
+
+fig.update_layout(
+    title=dict(text="Real-time HFSS Radiation Pattern", font=dict(color='#c9d1d9')),
+    height=500,
+    paper_bgcolor='rgba(0,0,0,0)',
+    plot_bgcolor='rgba(0,0,0,0)',
+    font=dict(color='#8b949e', family='Inter, sans-serif'),
+    polar=dict(
+        radialaxis=dict(visible=True, showline=False, gridcolor='#30363d', tickfont=dict(color='#8b949e')),
+        angularaxis=dict(gridcolor='#30363d', tickfont=dict(color='#c9d1d9')),
+        bgcolor='#0d1117'
+    ),
+    showlegend=True,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+)
+
 st.plotly_chart(fig, use_container_width=True)
 
 time.sleep(2)
