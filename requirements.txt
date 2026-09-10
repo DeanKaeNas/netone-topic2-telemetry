@@ -1,9 +1,9 @@
 streamlit
-paho-mqtt==1.6.1
+streamlit-autorefresh
+paho-mqtt
 joblib
+scikit-learn
 pandas
 numpy
-tflite-runtime
+tensorflow-cpu
 plotly
-paho-mqtt
-streamlit-autorefresh
