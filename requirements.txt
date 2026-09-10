@@ -1,0 +1,7 @@
+streamlit
+paho-mqtt==1.6.1
+joblib
+pandas
+numpy
+tflite-runtime
+plotly
