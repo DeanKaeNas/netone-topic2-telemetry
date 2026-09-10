@@ -5,3 +5,5 @@ pandas
 numpy
 tflite-runtime
 plotly
+paho-mqtt
+streamlit-autorefresh

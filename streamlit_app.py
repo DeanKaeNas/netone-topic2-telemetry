@@ -2,12 +2,19 @@ import json
 import time
 import random
 from datetime import datetime
+import zoneinfo
 import numpy as np
 import pandas as pd
 import joblib
 import streamlit as st
 import paho.mqtt.client as mqtt
-import tflite_runtime.interpreter as tflite
+
+# Compatibility handling for TFLite across different deployment platforms
+try:
+    import tflite_runtime.interpreter as tflite
+except ImportError:
+    import tensorflow.lite as tflite
+
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="DIAO — NetOne Intelligence", layout="wide")
@@ -66,22 +73,34 @@ def get_antenna_gain(phi, theta):
 # MQTT Telemetry Handler
 def on_mqtt_message(client, userdata, msg):
     try:
-        st.session_state.telemetry = json.loads(msg.payload)
+        st.session_state.telemetry = json.loads(msg.payload.decode("utf-8"))
     except Exception:
         pass
 
+# Initialize session state variables
 if "telemetry" not in st.session_state:
     st.session_state.telemetry = None
+if "sim_rssi_a" not in st.session_state:
     st.session_state.sim_rssi_a = -72.0
+if "sim_rssi_b" not in st.session_state:
     st.session_state.sim_rssi_b = -85.0
+
+# Initialize persistent MQTT connection
+if "mqtt_client" not in st.session_state:
     try:
-        mqtt_client = mqtt.Client(client_id="diao_streamlit_subscriber")
-        mqtt_client.on_message = on_mqtt_message
-        mqtt_client.connect(BROKER, 1883, 60)
-        mqtt_client.subscribe(TOPIC)
-        mqtt_client.loop_start()
+        # Paho MQTT v2.0+ compatibility check
+        if hasattr(mqtt, "CallbackAPIVersion"):
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="diao_streamlit_sub")
+        else:
+            client = mqtt.Client(client_id="diao_streamlit_sub")
+            
+        client.on_message = on_mqtt_message
+        client.connect(BROKER, 1883, 60)
+        client.subscribe(TOPIC)
+        client.loop_start()
+        st.session_state.mqtt_client = client
     except Exception:
-        pass
+        st.session_state.mqtt_client = None
 
 telemetry_data = st.session_state.telemetry
 if telemetry_data and telemetry_data.get("rssi_a") is not None:
@@ -97,8 +116,12 @@ else:
     current_angle = 90
     is_live = False
 
-current_hour = datetime.now().hour
-current_dow = datetime.now().weekday()
+# Normalize time features to Harare timezone (CAT / UTC+2)
+cat_tz = zoneinfo.ZoneInfo("Africa/Harare")
+now_cat = datetime.now(cat_tz)
+current_hour = now_cat.hour
+current_dow = now_cat.weekday()
+
 gain_a = get_antenna_gain(0, 60) + random.uniform(-1, 1)
 gain_b = get_antenna_gain(90, 60) + random.uniform(-1, 1)
 
