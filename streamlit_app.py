@@ -23,20 +23,8 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="DIAO — NetOne Intelligence", layout="wide", initial_sidebar_state="collapsed")
 
-BROKER = "broker.hivemq.com"
-TOPIC = "diao/netone/telemetry"
-SECTORS = list(range(0, 181, 15))
-SECTOR_NAMES = {
-    0: "Borrowdale", 15: "Highlands", 30: "Avondale", 45: "Mt Pleasant",
-    60: "Greendale", 75: "CBD North", 90: "CBD Centre", 105: "CBD South",
-    120: "Mbare", 135: "Highfields", 150: "Glen Norah", 165: "Budiriro", 180: "Chitungwiza"
-}
-# Physical node bearings (per hardware layout: Node A @ Borrowdale 30°, Node B @ Highfields 150°)
-NODE_A_BEARING = 30
-NODE_B_BEARING = 150
-
 # ─────────────────────────────────────────────────────────────
-# NOC DARK-MODE CSS
+# NOC DARK-MODE CSS (shared by login screen + dashboard)
 # ─────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -48,8 +36,78 @@ st.markdown("""
     .status-live { color: #3fb950; font-weight: bold; text-shadow: 0 0 6px rgba(63,185,80,0.5); }
     .status-sim { color: #d29922; font-weight: bold; }
     .panel-title { color: #8b949e; text-transform: uppercase; letter-spacing: 1px; font-size: 0.85rem; margin-bottom: 4px; }
+    .login-card {
+        max-width: 420px; margin: 8vh auto 0 auto; padding: 36px 32px;
+        background: linear-gradient(180deg, #161b22 0%, #0d1117 100%);
+        border: 1px solid #30363d; border-radius: 12px;
+        box-shadow: 0 0 40px rgba(88,166,255,0.06);
+    }
+    .login-eyebrow { color: #58a6ff; letter-spacing: 2px; font-size: 0.75rem; text-transform: uppercase; margin-bottom: 4px; }
+    .login-title { color: #ffffff; font-size: 1.6rem; font-weight: 700; margin-bottom: 2px; }
+    .login-sub { color: #6e7681; font-size: 0.85rem; margin-bottom: 22px; }
+    div[data-testid="stTextInput"] input {
+        background-color: #0d1117 !important; color: #c9d1d9 !important;
+        border: 1px solid #30363d !important; font-family: 'Fira Code', monospace !important;
+    }
+    div.stButton > button {
+        background-color: #1f6feb; color: white; border: none; border-radius: 6px;
+        font-weight: 600; letter-spacing: 0.3px;
+    }
+    div.stButton > button:hover { background-color: #388bfd; }
 </style>
 """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────
+# ACCESS CONTROL
+# Credential lives in st.secrets — never in this file.
+# Local dev:   .streamlit/secrets.toml  ->  dashboard_password = "..."
+# Cloud:       Streamlit Cloud app -> Settings -> Secrets -> same key/value
+# ─────────────────────────────────────────────────────────────
+def check_password() -> bool:
+    if st.session_state.get("password_correct", False):
+        return True
+
+    st.markdown('<div class="login-card">', unsafe_allow_html=True)
+    st.markdown('<div class="login-eyebrow">NESARI 2026 · Topic 2</div>', unsafe_allow_html=True)
+    st.markdown('<div class="login-title">DIAO — NetOne Intelligence</div>', unsafe_allow_html=True)
+    st.markdown('<div class="login-sub">Restricted access · ZNDU Team B credentials required</div>', unsafe_allow_html=True)
+
+    pwd = st.text_input("Access code", type="password", key="pwd_input", label_visibility="collapsed",
+                         placeholder="Enter access code")
+    submitted = st.button("Sign in", use_container_width=True)
+
+    if "dashboard_password" not in st.secrets:
+        st.error("No dashboard_password configured in st.secrets. Set it in Streamlit Cloud → Settings → Secrets.")
+        st.markdown('</div>', unsafe_allow_html=True)
+        return False
+
+    if submitted:
+        if pwd == st.secrets["dashboard_password"]:
+            st.session_state["password_correct"] = True
+            st.rerun()
+        else:
+            st.session_state["password_correct"] = False
+            st.error("Incorrect access code.")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+    return False
+
+if not check_password():
+    st.stop()
+
+# ─────────────────────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────────────────────
+BROKER = "broker.hivemq.com"
+TOPIC = "diao/netone/telemetry"
+SECTORS = list(range(0, 181, 15))
+SECTOR_NAMES = {
+    0: "Borrowdale", 15: "Highlands", 30: "Avondale", 45: "Mt Pleasant",
+    60: "Greendale", 75: "CBD North", 90: "CBD Centre", 105: "CBD South",
+    120: "Mbare", 135: "Highfields", 150: "Glen Norah", 165: "Budiriro", 180: "Chitungwiza"
+}
+NODE_A_BEARING = 30   # Borrowdale
+NODE_B_BEARING = 150  # Highfields
 
 # ─────────────────────────────────────────────────────────────
 # DATA / MODEL LOADING
@@ -73,7 +131,12 @@ def load_ml_models():
     rf = joblib.load("diao_spatial_rf.pkl")
     interpreter = tflite.Interpreter(model_path="diao_nn.tflite")
     interpreter.allocate_tensors()
-    return rf, interpreter, interpreter.get_input_details()[0], interpreter.get_output_details()[0]
+    handoff_clf = None
+    try:
+        handoff_clf = joblib.load("diao_handoff_gate.pkl")
+    except Exception:
+        pass
+    return rf, interpreter, interpreter.get_input_details()[0], interpreter.get_output_details()[0], handoff_clf
 
 def run_tflite_inference(interpreter, input_details, output_details, X_data):
     interpreter.set_tensor(input_details["index"], np.array(X_data, dtype=np.float32))
@@ -81,7 +144,7 @@ def run_tflite_inference(interpreter, input_details, output_details, X_data):
     return interpreter.get_tensor(output_details["index"])[0]
 
 lookup_table, angles_e, e_data, h_data = load_hfss_data()
-rf_model, tflite_interp, input_det, output_det = load_ml_models()
+rf_model, tflite_interp, input_det, output_det, handoff_clf = load_ml_models()
 
 def get_antenna_gain(phi, theta):
     p_val, t_val = max(0, min(360, int(phi))), max(0, min(180, int(theta)))
@@ -159,21 +222,32 @@ if rf_predicted == nn_predicted:
 else:
     ai_angle, ensemble_confidence = (nn_predicted, nn_confidence) if nn_confidence >= rf_confidence else (rf_predicted, rf_confidence)
 
+# Optional secondary gate: should we actually move the antenna, or hold position?
+# (See train_diao_models.py — mirrors the classify-before-optimize pattern used for
+# PIFA impedance matching, applied here to avoid unnecessary servo wear.)
+handoff_recommended = True
+handoff_confidence = None
+if handoff_clf is not None:
+    gate_features = [[rssi_a, rssi_b, gain_a, gain_b, now_cat.hour, now_cat.weekday(),
+                       current_angle, abs(ai_angle - current_angle)]]
+    try:
+        handoff_recommended = bool(handoff_clf.predict(gate_features)[0])
+        handoff_confidence = float(handoff_clf.predict_proba(gate_features)[0].max())
+    except Exception:
+        pass
+
 nearest_sector = min(SECTORS, key=lambda s: abs(s - current_angle))
-ai_sector_name = SECTOR_NAMES.get(min(SECTORS, key=lambda s: abs(s - ai_angle)), "—")
 
 # ─────────────────────────────────────────────────────────────
 # RADAR WIDGET (SVG + CSS, live sweep, sector wedges, node blips)
 # ─────────────────────────────────────────────────────────────
 def polar_xy(theta_deg, r, cx=210, cy=210):
-    """theta 0° = left horizon, 180° = right horizon, sweeping across the top."""
     math_deg = 180 - theta_deg
     rad = math.radians(math_deg)
     return cx + r * math.cos(rad), cy - r * math.sin(rad)
 
 def rssi_to_radius(rssi, r_max=185, r_min=25):
-    """Stronger signal (closer to -40 dBm) plots nearer the centre."""
-    frac = max(0.0, min(1.0, (rssi - (-100)) / (60)))  # -100..-40 -> 0..1
+    frac = max(0.0, min(1.0, (rssi - (-100)) / 60))
     return r_max - frac * (r_max - r_min)
 
 def render_radar(current_angle, ai_angle, rssi_a, rssi_b, confidence, live):
@@ -181,7 +255,6 @@ def render_radar(current_angle, ai_angle, rssi_a, rssi_b, confidence, live):
     R = 185
     sweep_color = "#3fb950" if live else "#d29922"
 
-    # Range rings (dBm labelled, outer=weak/-100, inner=strong/-40)
     rings = ""
     for frac, label in [(1.0, "-100"), (0.75, "-85"), (0.5, "-70"), (0.25, "-55"), (0.13, "-40")]:
         r = R * frac
@@ -189,7 +262,6 @@ def render_radar(current_angle, ai_angle, rssi_a, rssi_b, confidence, live):
         lx, ly = cx - r - 2, cy - 4
         rings += f'<text x="{lx}" y="{ly}" fill="#6e7681" font-size="9" text-anchor="end" font-family="Fira Code, monospace">{label}</text>'
 
-    # Degree ticks + sector labels every 15°
     ticks = ""
     for deg, name in SECTOR_NAMES.items():
         x1, y1 = polar_xy(deg, R, cx, cy)
@@ -198,7 +270,6 @@ def render_radar(current_angle, ai_angle, rssi_a, rssi_b, confidence, live):
         lx, ly = polar_xy(deg, R + 14, cx, cy)
         ticks += f'<text x="{lx:.1f}" y="{ly:.1f}" fill="#484f58" font-size="8" text-anchor="middle">{name}</text>'
 
-    # Active sector wedge (current serving sector), highlighted
     def wedge(center_deg, width_deg, color, opacity):
         a1, a2 = center_deg - width_deg / 2, center_deg + width_deg / 2
         x1, y1 = polar_xy(a1, R, cx, cy)
@@ -207,13 +278,11 @@ def render_radar(current_angle, ai_angle, rssi_a, rssi_b, confidence, live):
 
     wedges = wedge(nearest_sector, 15, "#58a6ff", 0.12) + wedge(min(SECTORS, key=lambda s: abs(s - ai_angle)), 15, "#d2a8ff", 0.10)
 
-    # Needles
     ncx, ncy = polar_xy(current_angle, R - 6, cx, cy)
     acx, acy = polar_xy(ai_angle, R - 6, cx, cy)
     needle_current = f'<line x1="{cx}" y1="{cy}" x2="{ncx:.1f}" y2="{ncy:.1f}" stroke="#58a6ff" stroke-width="2.5" style="filter:drop-shadow(0 0 4px #58a6ff);"/>'
     needle_ai = f'<line x1="{cx}" y1="{cy}" x2="{acx:.1f}" y2="{acy:.1f}" stroke="#d2a8ff" stroke-width="2" stroke-dasharray="4,3" style="filter:drop-shadow(0 0 4px #d2a8ff);"/>'
 
-    # Node blips
     ax, ay = polar_xy(NODE_A_BEARING, rssi_to_radius(rssi_a), cx, cy)
     bx, by = polar_xy(NODE_B_BEARING, rssi_to_radius(rssi_b), cx, cy)
     blip_a = f'''<circle cx="{ax:.1f}" cy="{ay:.1f}" r="6" fill="#3fb950" style="filter:drop-shadow(0 0 6px #3fb950);"><animate attributeName="r" values="5;8;5" dur="2s" repeatCount="indefinite"/></circle>
@@ -221,49 +290,42 @@ def render_radar(current_angle, ai_angle, rssi_a, rssi_b, confidence, live):
     blip_b = f'''<circle cx="{bx:.1f}" cy="{by:.1f}" r="6" fill="#ff7b72" style="filter:drop-shadow(0 0 6px #ff7b72);"><animate attributeName="r" values="5;8;5" dur="2.3s" repeatCount="indefinite"/></circle>
                  <text x="{bx:.1f}" y="{by-10:.1f}" fill="#ff7b72" font-size="9" text-anchor="middle" font-family="Fira Code, monospace">B {rssi_b:.0f}</text>'''
 
-    # Baseline + dead-zone hatch (antenna only sweeps 0-180, lower half inactive)
     baseline = f'<line x1="{cx-R}" y1="{cy}" x2="{cx+R}" y2="{cy}" stroke="#30363d" stroke-width="1"/>'
 
     html = f"""
     <div style="background:#0d1117;border:1px solid #21262d;border-radius:10px;padding:6px;">
     <svg width="100%" height="420" viewBox="0 0 420 250" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-            <clipPath id="halfclip"><rect x="0" y="0" width="420" height="212"/></clipPath>
-        </defs>
+        <defs><clipPath id="halfclip"><rect x="0" y="0" width="420" height="212"/></clipPath></defs>
         <g clip-path="url(#halfclip)">
             <g style="transform-origin:{cx}px {cy}px;animation:spin 4s linear infinite;">
-                <path d="M {cx},{cy} L {cx-R},{cy} A {R},{R} 0 0 1 {cx+R},{cy} Z"
-                      fill="url(#sweepgrad)" opacity="0.5"/>
+                <path d="M {cx},{cy} L {cx-R},{cy} A {R},{R} 0 0 1 {cx+R},{cy} Z" fill="url(#sweepgrad)" opacity="0.5"/>
             </g>
             <radialGradient id="sweepgrad">
                 <stop offset="0%" stop-color="{sweep_color}" stop-opacity="0.35"/>
                 <stop offset="100%" stop-color="{sweep_color}" stop-opacity="0"/>
             </radialGradient>
-            {rings}
-            {wedges}
-            {ticks}
-            {baseline}
-            {needle_ai}
-            {needle_current}
-            {blip_a}
-            {blip_b}
+            {rings}{wedges}{ticks}{baseline}{needle_ai}{needle_current}{blip_a}{blip_b}
             <circle cx="{cx}" cy="{cy}" r="4" fill="#c9d1d9"/>
         </g>
         <text x="{cx}" y="235" fill="#8b949e" font-size="10" text-anchor="middle" font-family="Fira Code, monospace">
-            LIVE {current_angle:.0f}° &#8212; AI TARGET {ai_angle}° ({confidence:.0%} conf)
+            LIVE {current_angle:.0f}&#176; &#8212; AI TARGET {ai_angle}&#176; ({confidence:.0%} conf)
         </text>
     </svg>
     </div>
-    <style>
-        @keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
-    </style>
+    <style>@keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}</style>
     """
     return html
 
 # ─────────────────────────────────────────────────────────────
 # LAYOUT
 # ─────────────────────────────────────────────────────────────
-st.title("DIAO — Dynamic Intelligent Antenna Optimization")
+top_l, top_r = st.columns([5, 1])
+with top_l:
+    st.title("DIAO — Dynamic Intelligent Antenna Optimization")
+with top_r:
+    if st.button("Sign out"):
+        st.session_state["password_correct"] = False
+        st.rerun()
 
 status_class = "status-live" if is_live else "status-sim"
 status_text = "LIVE (MQTT)" if is_live else "SIMULATION (hardware offline)"
@@ -274,6 +336,10 @@ st.markdown(
 if is_live and telemetry_data:
     esp_status = "Connected" if telemetry_data.get("esp32_connected") else "Simulation Mode"
     st.caption(f"ESP32: {esp_status} · {telemetry_data.get('decision_reason', '')}")
+if handoff_clf is not None:
+    verdict = "MOVE recommended" if handoff_recommended else "HOLD position"
+    conf_txt = f" ({handoff_confidence:.0%})" if handoff_confidence is not None else ""
+    st.caption(f"Handoff gate: {verdict}{conf_txt}")
 st.markdown("---")
 
 col1, col2, col3, col4, col5, col6 = st.columns(6)
@@ -290,33 +356,21 @@ radar_col, pattern_col = st.columns([1, 1])
 
 with radar_col:
     st.markdown('<p class="panel-title">Live Sector Radar</p>', unsafe_allow_html=True)
-    components.html(
-        render_radar(current_angle, ai_angle, rssi_a, rssi_b, ensemble_confidence, is_live),
-        height=430,
-    )
+    components.html(render_radar(current_angle, ai_angle, rssi_a, rssi_b, ensemble_confidence, is_live), height=430)
 
 with pattern_col:
     st.markdown('<p class="panel-title">HFSS Radiation Pattern</p>', unsafe_allow_html=True)
     fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(
-        r=e_data, theta=angles_e, name="E-Plane",
-        line=dict(color='#58a6ff', width=2), fill='toself', fillcolor='rgba(88,166,255,0.1)'
-    ))
-    fig.add_trace(go.Scatterpolar(
-        r=h_data, theta=angles_e, name="H-Plane",
-        line=dict(color='#ff7b72', width=2), fill='toself', fillcolor='rgba(255,123,114,0.1)'
-    ))
+    fig.add_trace(go.Scatterpolar(r=e_data, theta=angles_e, name="E-Plane",
+                                   line=dict(color='#58a6ff', width=2), fill='toself', fillcolor='rgba(88,166,255,0.1)'))
+    fig.add_trace(go.Scatterpolar(r=h_data, theta=angles_e, name="H-Plane",
+                                   line=dict(color='#ff7b72', width=2), fill='toself', fillcolor='rgba(255,123,114,0.1)'))
     fig.update_layout(
-        height=430,
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        height=430, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
         font=dict(color='#8b949e', family='Inter, sans-serif'),
-        polar=dict(
-            radialaxis=dict(visible=True, showline=False, gridcolor='#30363d', tickfont=dict(color='#8b949e')),
-            angularaxis=dict(gridcolor='#30363d', tickfont=dict(color='#c9d1d9')),
-            bgcolor='#0d1117'
-        ),
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        polar=dict(radialaxis=dict(visible=True, showline=False, gridcolor='#30363d', tickfont=dict(color='#8b949e')),
+                   angularaxis=dict(gridcolor='#30363d', tickfont=dict(color='#c9d1d9')), bgcolor='#0d1117'),
+        showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(t=20, b=10, l=10, r=10),
     )
     st.plotly_chart(fig, use_container_width=True)
