@@ -18,6 +18,12 @@ try:
 except ImportError:
     import tensorflow.lite as tflite
 
+try:
+    from train_diao_qlearning import q_recommend
+    HAS_QLEARN = True
+except Exception:
+    HAS_QLEARN = False
+
 # ─────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────
@@ -136,7 +142,13 @@ def load_ml_models():
         handoff_clf = joblib.load("diao_handoff_gate.pkl")
     except Exception:
         pass
-    return rf, interpreter, interpreter.get_input_details()[0], interpreter.get_output_details()[0], handoff_clf
+    q_payload = None
+    if HAS_QLEARN:
+        try:
+            q_payload = joblib.load("diao_qtable.pkl")
+        except Exception:
+            pass
+    return rf, interpreter, interpreter.get_input_details()[0], interpreter.get_output_details()[0], handoff_clf, q_payload
 
 def run_tflite_inference(interpreter, input_details, output_details, X_data):
     interpreter.set_tensor(input_details["index"], np.array(X_data, dtype=np.float32))
@@ -144,7 +156,7 @@ def run_tflite_inference(interpreter, input_details, output_details, X_data):
     return interpreter.get_tensor(output_details["index"])[0]
 
 lookup_table, angles_e, e_data, h_data = load_hfss_data()
-rf_model, tflite_interp, input_det, output_det, handoff_clf = load_ml_models()
+rf_model, tflite_interp, input_det, output_det, handoff_clf, q_payload = load_ml_models()
 
 def get_antenna_gain(phi, theta):
     p_val, t_val = max(0, min(360, int(phi))), max(0, min(180, int(theta)))
@@ -237,6 +249,17 @@ if handoff_clf is not None:
         pass
 
 nearest_sector = min(SECTORS, key=lambda s: abs(s - current_angle))
+
+# Third, independent opinion from the tabular Q-learning agent (train_diao_qlearning.py).
+# Read-only for now: it does not vote in ai_angle/ensemble_confidence above. Promote it
+# to authoritative once its behaviour has been validated against real telemetry, by
+# folding q_angle into the ensemble decision block the same way rf/nn are combined.
+q_angle, q_confidence = None, None
+if q_payload is not None:
+    try:
+        q_angle, q_confidence = q_recommend(current_angle, rssi_a, gain_a, rssi_b, gain_b, now_cat.hour, q_payload)
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────────────────────
 # RADAR WIDGET (SVG + CSS, live sweep, sector wedges, node blips)
@@ -340,6 +363,8 @@ if handoff_clf is not None:
     verdict = "MOVE recommended" if handoff_recommended else "HOLD position"
     conf_txt = f" ({handoff_confidence:.0%})" if handoff_confidence is not None else ""
     st.caption(f"Handoff gate: {verdict}{conf_txt}")
+if q_angle is not None:
+    st.caption(f"Learned policy (Q-learning): suggests {q_angle}\u00b0 ({q_confidence:.0%}) \u2014 advisory only, not yet driving the servo")
 st.markdown("---")
 
 col1, col2, col3, col4, col5, col6 = st.columns(6)
